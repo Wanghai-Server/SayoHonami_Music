@@ -1,0 +1,27 @@
+{
+	"schemaVersion": 1,
+	"id": "sayo-honami-music",
+	"version": "${version}",
+	"name": "SayoHonami_Music",
+	"description": "游戏内点歌台：QQ音乐 / 网易云 搜索点歌、服务端共享队列与全员同步播放、歌词显示、面板位置可调，支持 QQ / 微信 扫码登录。",
+	"authors": [
+		"SayoHonami"
+	],
+	"contact": {},
+	"license": "MIT",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.yue.music.YueMusic"
+		],
+		"client": [
+			"com.yue.music.client.YueMusicClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.4",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}

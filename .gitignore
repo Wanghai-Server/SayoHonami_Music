@@ -1,0 +1,84 @@
+# ------------------------------------------------------------------
+# 构建产物
+# ------------------------------------------------------------------
+.gradle/
+build/
+out/
+classes/
+bin/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.settings/
+.vscode/
+.classpath
+.project
+*.launch
+
+# macOS
+*.DS_Store
+
+# Fabric 开发环境
+run/
+
+# 编译产物
+*.class
+
+# Java 崩溃/性能文件
+hs_err_*.log
+replay_*.log
+*.hprof
+*.jfr
+
+# ------------------------------------------------------------------
+# 本地开发/调试素材（不对外发布）
+# ------------------------------------------------------------------
+
+# 反编译的 Minecraft 源码 —— Mojang 版权代码，绝对不能上传
+_ref/mcsrc/
+_ref/flsrc/
+
+# 崩溃日志（含本机系统路径）
+_ref/crash/
+_ref/crash2/
+_ref/crash3/
+
+# 登录抓包 / 二维码（可能含登录凭据）
+_ref/wx_hdr.txt
+_ref/wx_qr.png
+_ref/wx_qr_img.png
+
+# 测试用音视频 / 二进制响应
+_ref/*.bin
+_ref/*.mp3
+_ref/*.m4a
+_ref/*.flac
+
+# 接口调试返回的 JSON（含 traceid / IP 等）
+_ref/t_*.json
+
+# 本机生成的 classpath 清单（含绝对路径，别人用不了）
+_ref/e2e/classpath.txt
+_ref/audiotest/cp.txt
+
+# Java 版元数据（自动生成，不属于源码）
+_ref/1.21.11.json
+_ref/loom-metadata.xml
+
+# Fabric 官方模板工程（不是本项目代码）
+_tpl/
+
+# 构建产物中的 jar（保留 gradle wrapper）
+build/libs/
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# 完整开发日志（作者本地保留，不对外发布）
+README_FULL_DEVLOG.md
+docs/
+
+# 生成的各种报告 / 临时文件
+*.pdf

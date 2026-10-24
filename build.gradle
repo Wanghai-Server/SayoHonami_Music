@@ -1,0 +1,72 @@
+plugins {
+	// MC 1.21.11 是「有混淆」版本 → 必须用 fabric-loom-remap；
+	// 需要 Gradle 9.5+ 与 JVM 25（构建期），产物仍是 Java 21 字节码
+	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+base.archivesName = project.archives_base_name
+
+repositories {
+	mavenCentral()
+}
+
+loom {
+	splitEnvironmentSourceSets()
+
+	mods {
+		"yue-music" {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	// Fabric API 必须用 modImplementation：Loom 会把它从 intermediary 重映射到 Yarn 名字，
+	// 否则编译期看到的是 class_xxxx 这类中间名，报「无法访问 class_8710」
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// ---- 音频解码：MP3（MC 自带只有 jorbis，读不了 mp3）----
+	// 注意：Loom 的 include 不传递依赖，三个 jar 必须逐个 include，否则运行时会缺 SPI 报「格式不支持」
+	include(implementation("com.googlecode.soundlibs:mp3spi:1.9.5.4"))
+	include(implementation("com.googlecode.soundlibs:jlayer:1.0.1.4"))
+	include(implementation("com.googlecode.soundlibs:tritonus-share:0.3.7.4"))
+
+	// ---- 音频解码：FLAC（无损）----
+	// 为什么必须加：QQ音乐 VIP 歌解析出来的是「无损FLAC」（F000），
+	// 而 Java 运行时自带只有 wav/au/aif + 我们加的 mp3spi → 拿到 FLAC 就静音。
+	// jflac 自带 META-INF/services 注册（AudioFileReader + FormatConversionProvider），
+	// 所以它会自动接入 PcmSource 现有的 AudioSystem 解码链，代码零改动。
+	include(implementation("org.jflac:jflac-codec:1.5.2"))
+}
+
+processResources {
+	def props = ["version": project.version, "loader_version": project.loader_version]
+	props.each { k, v -> inputs.property k, v }
+
+	filesMatching("fabric.mod.json") {
+		expand props
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.encoding = "UTF-8"
+	it.options.release = 21
+}
+
+java {
+	withSourcesJar()
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+	from("LICENSE") {
+		rename { "${it}_${project.base.archivesName.get()}" }
+	}
+}
