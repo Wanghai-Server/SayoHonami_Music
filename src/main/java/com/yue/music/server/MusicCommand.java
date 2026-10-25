@@ -203,22 +203,44 @@ public final class MusicCommand {
 
 	private static int status(CommandContext<ServerCommandSource> ctx) {
 		ServerCommandSource src = ctx.getSource();
-		ServerLogin login = ServerLogin.get();
 
 		head(src);
-		if (login.loggedIn()) {
-			line(src, "登录状态：", "已登录 ✓", Formatting.GREEN);
-			if (isAdmin(src)) {
-				// 账号名只给管理员看
-				line(src, "账号：", login.nick().isEmpty() ? ("uin " + login.uin()) : login.nick(),
-						Formatting.WHITE);
+
+		// ---- 账号登录状态：两个平台分开看（可以同时登录、同时生效）----
+		boolean admin = isAdmin(src);
+		com.yue.music.api.ScanLogin qq = com.yue.music.api.MusicApi.effectiveQqLogin();
+		com.yue.music.api.ScanLogin ne = com.yue.music.api.MusicApi.neteaseLogin();
+		boolean qqOn = qq != null && qq.loggedIn();
+		boolean neOn = ne != null && ne.loggedIn();
+
+		line(src, "QQ音乐：", qqOn ? "已登录 ✓" : "未登录 ✗",
+				qqOn ? Formatting.GREEN : Formatting.RED);
+		if (qqOn && admin) {
+			String who = qq.nickname() == null || qq.nickname().isBlank()
+					? qq.method().label() : qq.nickname();
+			line(src, "  └ 账号：", who + "（" + qq.method().label() + "）", Formatting.WHITE);
+		}
+
+		line(src, "网易云：", neOn ? "已登录 ✓" : "未登录 ✗",
+				neOn ? Formatting.GREEN : Formatting.RED);
+		if (neOn && admin) {
+			String who = ne.nickname() == null || ne.nickname().isBlank()
+					? "(未知昵称)" : ne.nickname();
+			line(src, "  └ 账号：", who, Formatting.WHITE);
+		}
+
+		if (qqOn || neOn) {
+			line(src, "解析模式：", "服务端解析 —— 所有玩家免登录", Formatting.AQUA);
+			if (qqOn && neOn) {
+				line(src, "说明：", "两个平台各自用对应账号解析（QQ 走 QQ、网易云走网易云）",
+						Formatting.DARK_AQUA);
 			}
-			line(src, "模式：", "服务端解析 —— 所有玩家免登录", Formatting.AQUA);
 		} else {
-			line(src, "登录状态：", "未登录 ✗", Formatting.RED);
-			line(src, "当前模式：", "各客户端自己登录并解析", Formatting.GRAY);
-			if (isAdmin(src)) {
+			line(src, "解析模式：", "各客户端自己登录并解析", Formatting.GRAY);
+			if (admin) {
 				line(src, "开启方法：", "/" + DISPLAY + " login <浏览器Cookie>", Formatting.YELLOW);
+				line(src, "  支持：", "QQ 的 qm_keyst / 网易云的 MUSIC_U（可分别登录）",
+						Formatting.DARK_GRAY);
 			}
 		}
 
@@ -229,7 +251,13 @@ public final class MusicCommand {
 			line(src, "正在播放：", cur.track().display(), Formatting.WHITE);
 			line(src, "点歌人：", cur.addedBy() == null || cur.addedBy().isEmpty()
 					? "(未知)" : cur.addedBy(), Formatting.GRAY);
-			line(src, "直链来源：", ServerLogin.get().loggedIn() ? "服务端解析" : "点歌客户端提供",
+			// 直链来源按「当前这首歌属于哪个平台」来判断，比笼统的「服务端解析」准确
+			String source = cur.track().source();
+			boolean thisPlatformOn = "netease".equals(source) ? neOn : qqOn;
+			line(src, "直链来源：", ServerLogin.get().loggedIn()
+							? (thisPlatformOn ? "服务端解析（" + ("netease".equals(source) ? "网易云" : "QQ音乐") + " 账号）"
+									: "服务端解析（该平台未登录，可能降级）")
+							: "点歌客户端提供",
 					Formatting.DARK_GRAY);
 		} else {
 			line(src, "正在播放：", "(空闲)", Formatting.GRAY);

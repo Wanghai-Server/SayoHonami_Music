@@ -36,17 +36,48 @@ public final class ServerLogin {
 	private ServerLogin() {
 	}
 
-	/** 服务端启动时从配置里恢复登录态。 */
+	/**
+	 * 服务端启动时从配置里恢复登录态。
+	 *
+	 * <p>QQ 和网易云<b>各存一份</b>，两个平台可以同时登录、同时生效：
+	 * QQ 的歌用 QQ 账号解析，网易云的歌用网易云账号解析。
+	 */
 	public void load() {
 		MusicConfig cfg = MusicConfig.get();
-		Map<String, String> saved = cfg.qqCookies;
-		if (saved == null || saved.isEmpty()) {
-			loggedIn = false;
-			YueMusic.LOGGER.info("[{}] 服务端未登录（配置里没有 qqCookies）。"
-					+ "如需让所有玩家共享账号，请用 /symus login <cookie>", YueMusic.MOD_NAME);
-			return;
+		Map<String, String> qq = cfg.qqCookies;
+		Map<String, String> ne = cfg.neteaseCookies;
+
+		boolean hasQq = qq != null && !qq.isEmpty()
+				&& !qq.getOrDefault("qm_keyst", qq.getOrDefault("qqmusic_key", "")).isEmpty();
+		boolean hasNe = ne != null && !ne.isEmpty()
+				&& !ne.getOrDefault("MUSIC_U", "").isEmpty();
+
+		if (hasQq) {
+			apply(qq, cfg.qqNickname);
 		}
-		apply(saved, cfg.qqNickname);
+		if (hasNe) {
+			// 网易云的账号信息由 NeteaseLogin 自己维护（MusicApi 里已经加载好了），
+			// 这里只需要保证「服务端算已登录」这个标记是对的，否则不会去解析直链。
+			if (!hasQq) {
+				loggedIn = true;
+				nick = cfg.neteaseNickname == null ? "" : cfg.neteaseNickname;
+				uin = "netease";
+				cookie = "";
+				lastError = "";
+			}
+			YueMusic.LOGGER.info("[{}] 服务端已恢复网易云登录（昵称={}）",
+					YueMusic.MOD_NAME,
+					cfg.neteaseNickname == null || cfg.neteaseNickname.isEmpty()
+							? "(未知)" : cfg.neteaseNickname);
+		}
+		if (hasQq && hasNe) {
+			YueMusic.LOGGER.info("[{}] 服务端两个平台都已登录（QQ + 网易云）", YueMusic.MOD_NAME);
+		}
+		if (!hasQq && !hasNe) {
+			loggedIn = false;
+			YueMusic.LOGGER.info("[{}] 服务端未登录（配置里没有 qqCookies / neteaseCookies）。"
+					+ "如需让所有玩家共享账号，请用 /symus login <cookie>", YueMusic.MOD_NAME);
+		}
 	}
 
 	private void apply(Map<String, String> cookies, String nickname) {
@@ -71,8 +102,16 @@ public final class ServerLogin {
 				YueMusic.MOD_NAME, uin, nick.isEmpty() ? "(未知)" : nick, cookies.size());
 	}
 
+	/**
+	 * 服务端能不能解析直链 —— <b>任一平台登录即可</b>。
+	 *
+	 * <p>不再只看内部的 {@code loggedIn} 标记：网易云有单独的登录对象
+	 * （{@code NeteaseLogin}），两个平台要能各自独立生效。
+	 * 只看标记的话，「只登录了网易云」会被误判成未登录，服务端就不解析了。
+	 */
 	public boolean loggedIn() {
-		return loggedIn;
+		if (loggedIn) return true;
+		return MusicApi.neteaseLoggedIn() || MusicApi.effectiveQqLogin() != null;
 	}
 
 	public String nick() {

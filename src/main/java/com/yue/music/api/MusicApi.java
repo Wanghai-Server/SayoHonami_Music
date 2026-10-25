@@ -174,22 +174,46 @@ public final class MusicApi {
 	}
 
 	/**
-	 * 生效的 <b>QQ音乐</b> Cookie：优先用当前选中且已登录的那个。
+	 * 生效的 <b>QQ音乐</b> Cookie（QQ 或微信账号）。
 	 *
 	 * <p>⚠ 只认 QQ / 微信。网易云的 {@code MUSIC_U} 不能拿去请求 QQ 的接口，
 	 * 反过来也一样 —— 所以两种凭据必须分开取（见 {@link #neteaseCookieHeader()}）。
+	 *
+	 * <p>⚠⚠ 这里<b>不能</b>图省事用 {@link #anyLoggedInMethod()}：
+	 * 当「当前选中的登录方式」是网易云时，它会返回网易云，
+	 * 于是 QQ 明明登录了却拿不到 Cookie —— QQ 的歌就会退化成免登录质量。
+	 * 所以这里按平台列表**直接找已登录的 QQ/微信**。
 	 */
 	public static String effectiveCookieHeader() {
+		// ① 当前选中的方式不是网易云且已登录 → 优先用它
 		ScanLogin a = activeLogin();
 		if (a != null && a.loggedIn() && a.method() != ScanLogin.Method.NETEASE) {
 			return a.cookieHeader();
 		}
-		ScanLogin.Method m = anyLoggedInMethod();
-		if (m != null && m != ScanLogin.Method.NETEASE) {
-			ScanLogin other = LOGINS.get(m);
-			if (other != null) return other.cookieHeader();
+		// ② 否则自己找已登录的 QQ / 微信（与「当前选中」无关，两家可同时在线）
+		for (ScanLogin.Method m : new ScanLogin.Method[]{
+				ScanLogin.Method.WECHAT, ScanLogin.Method.QQ}) {
+			ScanLogin l = LOGINS.get(m);
+			if (l != null && l.loggedIn()) return l.cookieHeader();
 		}
 		return "";
+	}
+
+	/**
+	 * 当前生效的 <b>QQ音乐</b> 登录对象（QQ 或微信），没有则 null。
+	 *
+	 * <p>给状态显示用：和 {@link #effectiveCookieHeader()} 保持一致的口径，
+	 * 这样「显示哪个账号」和「实际用哪个账号」不会对不上。
+	 */
+	public static ScanLogin effectiveQqLogin() {
+		ScanLogin a = activeLogin();
+		if (a != null && a.loggedIn() && a.method() != ScanLogin.Method.NETEASE) return a;
+		for (ScanLogin.Method m : new ScanLogin.Method[]{
+				ScanLogin.Method.WECHAT, ScanLogin.Method.QQ}) {
+			ScanLogin l = LOGINS.get(m);
+			if (l != null && l.loggedIn()) return l;
+		}
+		return null;
 	}
 
 	/** 生效的<b>网易云</b> Cookie（{@code MUSIC_U} 等）；没登录返回空串。 */
