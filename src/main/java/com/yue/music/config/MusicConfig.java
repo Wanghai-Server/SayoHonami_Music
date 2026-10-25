@@ -110,7 +110,10 @@ public class MusicConfig {
 	/** 微信扫码登录的 Cookie。 */
 	public Map<String, String> wechatCookies = new HashMap<>();
 	public String wechatNickname = "";
-	/** 上次使用的登录方式：qq / wechat。 */
+	/** 网易云登录的 Cookie（核心是 MUSIC_U）。 */
+	public Map<String, String> neteaseCookies = new HashMap<>();
+	public String neteaseNickname = "";
+	/** 上次使用的登录方式：qq / wechat / netease。 */
 	public String lastLoginMethod = "qq";
 
 	// ---- 房间记忆（自动保存） ----
@@ -147,6 +150,7 @@ public class MusicConfig {
 				if (cfg != null) {
 					if (cfg.qqCookies == null) cfg.qqCookies = new HashMap<>();
 					if (cfg.wechatCookies == null) cfg.wechatCookies = new HashMap<>();
+					if (cfg.neteaseCookies == null) cfg.neteaseCookies = new HashMap<>();
 					if (cfg.playerRooms == null) cfg.playerRooms = new HashMap<>();
 					if (cfg.roomLimits == null) cfg.roomLimits = new HashMap<>();
 					cfg.sanitize();

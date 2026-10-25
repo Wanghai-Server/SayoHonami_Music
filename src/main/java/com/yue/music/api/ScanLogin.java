@@ -28,7 +28,8 @@ public abstract class ScanLogin {
 	/** 登录方式。 */
 	public enum Method {
 		QQ("QQ", "QQ音乐登录"),
-		WECHAT("微信", "微信登录");
+		WECHAT("微信", "微信登录"),
+		NETEASE("网易云", "网易云登录");
 
 		private final String label;
 		private final String buttonLabel;

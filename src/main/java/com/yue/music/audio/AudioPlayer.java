@@ -87,6 +87,14 @@ public final class AudioPlayer {
 
 	private volatile PlayRequest request;
 
+	/**
+	 * 已经处理过（播过 / 播失败过）的请求代次。
+	 *
+	 * <p>常驻播放线程靠它做到「一个请求只播一次」，否则失败会无限重试、
+	 * 正常播完会无限重播。见 {@link #runLoop()}。
+	 */
+	private volatile int lastPlayedToken = -1;
+
 	/** 唯一的播放线程（常驻，不随切歌重建）。 */
 	private Thread playThread;
 	private SourceDataLine line;
@@ -201,11 +209,21 @@ public final class AudioPlayer {
 	 *
 	 * <p>它一直活着：有新请求就播，没有就歇着。
 	 * 播放过程中每一步都核对代次，代次变了立刻收工去拿新请求。
+	 *
+	 * <p><b>一个请求只播一次</b>（靠 {@link #lastPlayedToken} 记着）：
+	 * 以前这里只判断「代次没变」，于是 {@code playOne()} 不管成功还是失败
+	 * 都会立刻被<b>再调一次</b> ——
+	 * <ul>
+	 *   <li>失败了 → 全速无限重试（日志实证：同一个坏链接 5 分钟内重试 418 次）</li>
+	 *   <li>正常放完 → 这首歌<b>又从头播一遍</b>（永远不结束）</li>
+	 * </ul>
 	 */
 	private void runLoop() {
 		while (true) {
 			PlayRequest req = request;
-			if (req != null && req.token() == generation) {
+			if (req != null && req.token() == generation && req.token() != lastPlayedToken) {
+				// 先记账再播：无论 playOne 怎么返回，这个请求都算处理过了
+				lastPlayedToken = req.token();
 				try {
 					playOne(req);
 				} catch (InterruptedException e) {
@@ -381,6 +399,27 @@ public final class AudioPlayer {
 				return;
 			}
 
+			// ⚠ 必须校验「回来的到底是不是音频」。
+			//
+			// 网易云的外层地址（song/media/outer/url）是「永远 200」的：
+			// 歌下架/版权受限时它会 302 到 https://music.163.com/404，
+			// 最终返回 <b>HTTP 200 + text/html</b>（10 万字节的网页）。
+			// 以前不检查类型，直接把这个网页丢给解码器 →
+			// UnsupportedAudioFileException: Stream of unsupported format，
+			// 而调用方看不出「是歌没了」还是「格式不支持」，只能干重试。
+			//
+			// 日志实证：《Fools Gold》《雨爱》都是这样，
+			// 同一个链接 5 分钟内重试了 418 次，全程没声音。
+			String contentType = resp.headers().firstValue("content-type").orElse("").toLowerCase();
+			if (contentType.startsWith("text/") || contentType.contains("html")) {
+				String finalUrl = resp.uri() == null ? "" : resp.uri().toString();
+				drainQuietly(resp.body());
+				fail(finalUrl.contains("/404")
+						? "这首歌在网易云已下架或版权受限（返回了 404 页面）"
+						: "播放地址返回的是网页而不是音频（可能已失效）");
+				return;
+			}
+
 			try (InputStream raw = new BufferedInputStream(resp.body(), CHUNK_BYTES);
 				 PcmSource pcm = PcmSource.open(raw)) {
 				if (token != generation) return;
@@ -458,7 +497,7 @@ public final class AudioPlayer {
 		} catch (Exception e) {
 			// 切歌时关线路会让阻塞中的 write() 抛异常 —— 那不是"播放失败"，别报错
 			if (token == generation) {
-				YueMusic.LOGGER.warn("[YueMusic] 播放失败: {}", e.toString());
+				YueMusic.LOGGER.warn("[YueMusic] 播放失败（{}）: {}", req.url(), e.toString());
 				fail("播放失败：" + friendly(e));
 			}
 		} finally {
@@ -487,7 +526,9 @@ public final class AudioPlayer {
 
 	private static String friendly(Exception e) {
 		if (e instanceof javax.sound.sampled.UnsupportedAudioFileException) {
-			return "音频格式不支持（可能是 m4a/flac 或加密流）";
+			// 注意：链接返回网页（歌下架/404）这种情况已经在下载阶段拦掉了，
+			// 走到这里通常是真的格式问题（m4a / 加密流 / 文件损坏）。
+			return "音频格式不支持（可能是 m4a/加密流），或这首歌的地址已失效";
 		}
 		if (e instanceof javax.sound.sampled.LineUnavailableException) {
 			return "音频设备被占用或不可用（检查系统声音设置）";
@@ -495,5 +536,25 @@ public final class AudioPlayer {
 		String m = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
 		if (m.contains("timed out") || m.contains("Timeout")) return "音频下载超时";
 		return m;
+	}
+
+	/**
+	 * 安静地把响应体读掉（不让连接池里留半截连接）。
+	 *
+	 * <p>检测到「回来的不是音频」时要立刻失败，但 HTTP 连接得收干净，
+	 * 否则频繁失败会攒下一堆没关闭的连接。
+	 */
+	private static void drainQuietly(InputStream body) {
+		if (body == null) return;
+		try (InputStream in = body) {
+			byte[] buf = new byte[8192];
+			int total = 0;
+			int n;
+			// 最多读 512KB 就够了，超出直接放弃（反正要丢）
+			while (total < 512 * 1024 && (n = in.read(buf)) > 0) {
+				total += n;
+			}
+		} catch (Exception ignored) {
+		}
 	}
 }

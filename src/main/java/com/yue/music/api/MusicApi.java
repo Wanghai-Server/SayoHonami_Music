@@ -25,7 +25,7 @@ public final class MusicApi {
 	private MusicApi() {
 	}
 
-	/** 注册所有平台 + 初始化两种登录方式。服务端和客户端初始化时都会调用（幂等）。 */
+	/** 注册所有平台 + 初始化三种登录方式。服务端和客户端初始化时都会调用（幂等）。 */
 	public static synchronized void init() {
 		if (!PROVIDERS.isEmpty()) return;
 		MusicConfig cfg = MusicConfig.get();
@@ -38,11 +38,24 @@ public final class MusicApi {
 		if (!cfg.wechatCookies.isEmpty()) wechat.loadCookies(cfg.wechatCookies, cfg.wechatNickname);
 		LOGINS.put(ScanLogin.Method.WECHAT, wechat);
 
-		activeLogin = ScanLogin.Method.WECHAT.name().equalsIgnoreCase(cfg.lastLoginMethod)
-				? ScanLogin.Method.WECHAT : ScanLogin.Method.QQ;
+		NeteaseLogin netease = new NeteaseLogin();
+		if (!cfg.neteaseCookies.isEmpty()) netease.loadCookies(cfg.neteaseCookies, cfg.neteaseNickname);
+		LOGINS.put(ScanLogin.Method.NETEASE, netease);
+
+		activeLogin = parseMethod(cfg.lastLoginMethod, ScanLogin.Method.QQ);
 
 		register(new QQProvider(qq, wechat));
-		register(new NeteaseProvider());
+		register(new NeteaseProvider(netease));
+	}
+
+	/** 把配置里的字符串还原成登录方式（认不出就用默认值）。 */
+	private static ScanLogin.Method parseMethod(String name, ScanLogin.Method fallback) {
+		if (name != null) {
+			for (ScanLogin.Method m : ScanLogin.Method.values()) {
+				if (m.name().equalsIgnoreCase(name)) return m;
+			}
+		}
+		return fallback;
 	}
 
 	/** 扩展点：实现 {@link MusicProvider} 后在这里注册即可增加平台。 */
@@ -87,31 +100,44 @@ public final class MusicApi {
 		return l != null ? l : qqLogin();
 	}
 
-	/** 是否任一方式已登录。 */
+	/** 是否任一方式已登录（三种方式都算）。 */
 	public static boolean anyLoggedIn() {
 		ScanLogin a = activeLogin();
-		return a != null && a.loggedIn();
+		if (a != null && a.loggedIn()) return true;
+		return anyLoggedInMethod() != null;
 	}
 
 	/** 任意一种登录方式已经登录（用于自动挑选）。 */
 	public static ScanLogin.Method anyLoggedInMethod() {
+		// 优先「当前选中」的方式，其次按 微信 → QQ → 网易云 找
+		ScanLogin cur = LOGINS.get(activeLogin);
+		if (cur != null && cur.loggedIn()) return activeLogin;
 		ScanLogin wechat = LOGINS.get(ScanLogin.Method.WECHAT);
 		if (wechat != null && wechat.loggedIn()) return ScanLogin.Method.WECHAT;
 		ScanLogin qq = LOGINS.get(ScanLogin.Method.QQ);
 		if (qq != null && qq.loggedIn()) return ScanLogin.Method.QQ;
+		ScanLogin ne = LOGINS.get(ScanLogin.Method.NETEASE);
+		if (ne != null && ne.loggedIn()) return ScanLogin.Method.NETEASE;
 		return null;
 	}
 
-	/** 登录成功后把 Cookie 写进配置（两种方式各存一份）。 */
+	/** 登录成功后把 Cookie 写进配置（每种方式各存一份）。 */
 	public static void persistLogin(ScanLogin login) {
 		if (login == null || !login.loggedIn()) return;
 		MusicConfig cfg = MusicConfig.get();
-		if (login.method() == ScanLogin.Method.WECHAT) {
-			cfg.wechatCookies = new java.util.HashMap<>(login.cookieMap());
-			cfg.wechatNickname = login.nickname();
-		} else {
-			cfg.qqCookies = new java.util.HashMap<>(login.cookieMap());
-			cfg.qqNickname = login.nickname();
+		switch (login.method()) {
+			case WECHAT -> {
+				cfg.wechatCookies = new java.util.HashMap<>(login.cookieMap());
+				cfg.wechatNickname = login.nickname();
+			}
+			case NETEASE -> {
+				cfg.neteaseCookies = new java.util.HashMap<>(login.cookieMap());
+				cfg.neteaseNickname = login.nickname();
+			}
+			default -> {
+				cfg.qqCookies = new java.util.HashMap<>(login.cookieMap());
+				cfg.qqNickname = login.nickname();
+			}
 		}
 		cfg.lastLoginMethod = login.method().name().toLowerCase();
 		cfg.save();
@@ -133,6 +159,10 @@ public final class MusicApi {
 		if (wx != null) {
 			wx.loadCookies(cfg.wechatCookies == null ? Map.of() : cfg.wechatCookies, cfg.wechatNickname);
 		}
+		ScanLogin ne = LOGINS.get(ScanLogin.Method.NETEASE);
+		if (ne != null) {
+			ne.loadCookies(cfg.neteaseCookies == null ? Map.of() : cfg.neteaseCookies, cfg.neteaseNickname);
+		}
 		if (cfg.lastLoginMethod != null) {
 			for (ScanLogin.Method m : ScanLogin.Method.values()) {
 				if (m.name().equalsIgnoreCase(cfg.lastLoginMethod)) {
@@ -143,16 +173,41 @@ public final class MusicApi {
 		}
 	}
 
-	/** 生效的 Cookie：优先用当前选中且已登录的那个。 */
+	/**
+	 * 生效的 <b>QQ音乐</b> Cookie：优先用当前选中且已登录的那个。
+	 *
+	 * <p>⚠ 只认 QQ / 微信。网易云的 {@code MUSIC_U} 不能拿去请求 QQ 的接口，
+	 * 反过来也一样 —— 所以两种凭据必须分开取（见 {@link #neteaseCookieHeader()}）。
+	 */
 	public static String effectiveCookieHeader() {
 		ScanLogin a = activeLogin();
-		if (a != null && a.loggedIn()) return a.cookieHeader();
+		if (a != null && a.loggedIn() && a.method() != ScanLogin.Method.NETEASE) {
+			return a.cookieHeader();
+		}
 		ScanLogin.Method m = anyLoggedInMethod();
-		if (m != null) {
+		if (m != null && m != ScanLogin.Method.NETEASE) {
 			ScanLogin other = LOGINS.get(m);
 			if (other != null) return other.cookieHeader();
 		}
 		return "";
+	}
+
+	/** 生效的<b>网易云</b> Cookie（{@code MUSIC_U} 等）；没登录返回空串。 */
+	public static String neteaseCookieHeader() {
+		ScanLogin ne = LOGINS.get(ScanLogin.Method.NETEASE);
+		if (ne != null && ne.loggedIn()) return ne.cookieHeader();
+		return "";
+	}
+
+	/** 网易云是否已登录。 */
+	public static boolean neteaseLoggedIn() {
+		ScanLogin ne = LOGINS.get(ScanLogin.Method.NETEASE);
+		return ne != null && ne.loggedIn();
+	}
+
+	/** 网易云登录对象（设置页用）。 */
+	public static ScanLogin neteaseLogin() {
+		return LOGINS.get(ScanLogin.Method.NETEASE);
 	}
 
 	/** 生效的登录名（设置页显示用）。 */
@@ -221,6 +276,27 @@ public final class MusicApi {
 		if (!MusicConfig.get().crossSourceFallback) return direct;
 
 		// ---- 跨平台降级 ----
+		PlayUrl alt = resolveFromOther(track, verbose);
+		return alt.ok() ? alt : direct;
+	}
+
+	/**
+	 * 只从「另一个平台」找同名歌并解析播放地址。
+	 *
+	 * <p><b>什么时候需要它</b>：原平台的直链确认已经失效时。
+	 *
+	 * <p>典型情况是网易云的下架歌：外层地址
+	 * {@code song/media/outer/url?id=xxx.mp3} 是「永远 200」的，
+	 * 歌没了它会 302 到 {@code music.163.com/404}，最终返回
+	 * <b>HTTP 200 + text/html</b>。这时再解析原平台只会拿到<b>同一根坏链</b>，
+	 * 只有直接去对面平台找同名版本才有意义。
+	 *
+	 * @return 另一个平台的播放地址；找不到时 {@link PlayUrl#error()} 有原因
+	 */
+	public static PlayUrl resolveFromOther(MusicTrack track, boolean verbose) {
+		if (!MusicConfig.get().crossSourceFallback) {
+			return PlayUrl.fail("跨平台兜底已关闭");
+		}
 		for (MusicSource other : MusicSource.all()) {
 			if (other.id().equals(track.source())) continue;
 			MusicProvider op = PROVIDERS.get(other);
@@ -244,7 +320,7 @@ public final class MusicApi {
 				}
 			}
 		}
-		return direct;
+		return PlayUrl.fail("另一个平台也没找到能放的版本");
 	}
 
 	/** 在候选列表里挑同名同歌手的歌。 */

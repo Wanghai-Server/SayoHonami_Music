@@ -352,14 +352,20 @@ public final class ClientAudio {
 
 		workers.submit(() -> {
 			try {
+				// 这首歌之前起播失败过几次？（>0 说明上一根直链是坏的）
+				int failures = startFailures.getOrDefault(key, 0);
 				String url = urlCache.get(key);
-				if (url == null) {
+				if (url == null && failures == 0) {
 					// 优先用**服务端广播过来的直链**：那是服主账号解析的，
 					// 本机不需要登录就能直接下载（这才是「服务端登录」的意义）。
 					//
 					// ⚠ 必须校验 key：pushedUrl 是全局字段，里面可能装着**上一首**的直链
 					//（服务端解析新歌要 1~3 秒，这期间广播里没有新直链）。
 					// 不校验的话会拿着上一首的地址去播新歌 —— 表现就是「插播后不播放」。
+					//
+					// ⚠ 只在【第一次尝试】时信服务端直链。失败过就说明这根链是坏的
+					//（网易云下架歌的外层地址永远 200 但内容是 404 网页），
+					// 再信它只会一直失败 —— 日志实证：同一个坏链重试了 418 次。
 					String pushed = pushedUrlKey != null && pushedUrlKey.equals(key) ? pushedUrl : null;
 					if (pushed != null && !pushed.isBlank()) {
 						url = pushed;
@@ -372,7 +378,16 @@ public final class ClientAudio {
 					}
 				}
 				if (url == null) {
-					PlayUrl resolved = MusicApi.resolve(track, true);
+					// 失败过 → 说明原平台这根链已经放不了，直接去**另一个平台**找同名歌。
+					// 否则再解析一次原平台，只会拿到同一根坏链。
+					PlayUrl resolved;
+					if (failures > 0) {
+						YueMusic.LOGGER.info("[{}] 《{}》第 {} 次重试，跳过原平台直链，改从另一个平台找",
+								YueMusic.MOD_NAME, track.title(), failures + 1);
+						resolved = MusicApi.resolveFromOther(track, true);
+					} else {
+						resolved = MusicApi.resolve(track, true);
+					}
 					if (!resolved.ok()) {
 						lastError = resolved.error() == null ? "无法获取播放地址" : resolved.error();
 						YueMusic.LOGGER.warn("[{}] 本机解析失败（服务端也没给直链）：{} → {}",
@@ -382,7 +397,9 @@ public final class ClientAudio {
 						// 这时候直接 skipBroken 会把整张歌单挨个跳过去 ——
 						// 表现就是「切换房间后听不到声音，要手动刷新才行」。
 						// 所以这里**等**，让 tick() 稍后用服务端下发的直链重试。
-						if (serverLoggedIn) {
+						//
+						// 但「已经试过跨平台兜底还失败」就不要再等了 —— 那是真的放不了。
+						if (serverLoggedIn && failures == 0) {
 							status = "等服务器解析播放地址…";
 							loadingKey = "";
 							waitingServerUrl = true;
@@ -391,7 +408,8 @@ public final class ClientAudio {
 									YueMusic.MOD_NAME, track.title());
 							return;
 						}
-						// 服务端也没登录 → 这首歌确实放不了，告诉服务端跳过
+						// 服务端也没登录 / 兜底也没找到 → 这首歌确实放不了，告诉服务端跳过
+						startFailures.remove(key);
 						skipBroken(track);
 						return;
 					}
@@ -446,6 +464,42 @@ public final class ClientAudio {
 				status = "";
 			}
 		});
+	}
+
+	/**
+	 * 处理「这首起播失败」：清掉坏直链 → 重试（第二次起改走跨平台兜底）→ 连续 3 次仍失败就跳过。
+	 *
+	 * <p>失败可能来自两个地方：{@link AudioPlayer} 直接报错（state=ERROR），
+	 * 或者播放线程结束了却没出过声（state=IDLE + 无进度）。两条路都走这里，
+	 * 避免「加载阶段失败却永远不跳过」那种卡死。
+	 *
+	 * @param key    曲目 key（source:id）
+	 * @param reason 失败原因（写进 lastError，界面上能看到）
+	 */
+	private void handleStartFailure(MusicTrack track, String key, String reason) {
+		// ⚠ 关键：必须把 urlCache 里这条直链清掉再重试。
+		// 否则会一直拿着同一根坏链（过期 vkey / CDN 抽风 / 歌已下架）
+		// 反复重试 —— 表现就是「插播了但一直不播放」，而且永远好不了。
+		int tries = startFailures.merge(key, 1, Integer::sum);
+		player.stop();
+		urlCache.remove(key);
+		playingKey = "";
+		loadingKey = "";
+		waitingServerUrl = false;
+		if (reason != null && !reason.isBlank()) {
+			lastError = reason;
+			status = reason;
+		}
+		if (tries <= 3) {
+			YueMusic.LOGGER.info("[{}] 《{}》起播失败（第 {} 次：{}），丢弃直链重新解析",
+					YueMusic.MOD_NAME, track.title(), tries, reason);
+			startCurrent();
+		} else {
+			YueMusic.LOGGER.warn("[{}] 《{}》连续 {} 次起播失败，跳过这首（{}）",
+					YueMusic.MOD_NAME, track.title(), tries, reason);
+			startFailures.remove(key);
+			skipBroken(track);
+		}
 	}
 
 	/** 这首歌所有平台都放不了，请求服务端切下一首。 */
@@ -544,6 +598,16 @@ public final class ClientAudio {
 				loadingKey = "";
 				startFailures.remove(key);   // 这次成功了，清掉失败计数
 				YueMusic.LOGGER.info("[{}] 《{}》已确认起播", YueMusic.MOD_NAME, track.title());
+			} else if (player.state() == AudioPlayer.State.ERROR) {
+				// ⚠ 播放器**直接报错**了（不是超时，是明确的失败）。
+				//
+				// 以前这里没有分支：`playingKey` 只在「真的出过声」之后才设上，
+				// 所以加载阶段的失败既不会进下面的「播完了/起播失败」逻辑，
+				// 也不会被跳歌处理 —— 客户端就永远卡在这首，一直重试到歌放完。
+				// 日志实证：《Fools Gold》链接返回 404 网页，5 分钟内重试 418 次，
+				// 全程没声音，服务端还一直以为在正常播放（已播 76s / 81s …）。
+				handleStartFailure(track, key, player.error());
+				return;
 			} else if (waitingServerUrl) {
 				// 正在等服务端下发直链（切房间 / 歌单导入后常见）。
 				// 这里**不能**当成起播失败去跳过 —— 那会把整张歌单挨个跳过去。
@@ -592,25 +656,7 @@ public final class ClientAudio {
 				sendControl(MusicNetworking.Action.NEXT, 0);
 			} else {
 				// 还没出过声 → 不是播完，而是起播失败/被中断。
-				//
-				// ⚠ 关键：必须把 urlCache 里这条直链清掉再重试。
-				// 否则会一直拿着同一根坏链（过期 vkey / CDN 抽风 / 下载失败）
-				// 反复重试 —— 表现就是「插播了但一直不播放」，而且永远好不了。
-				int tries = startFailures.merge(key, 1, Integer::sum);
-				player.stop();
-				urlCache.remove(key);
-				playingKey = "";
-				loadingKey = "";
-				if (tries <= 3) {
-					YueMusic.LOGGER.info("[{}] 《{}》起播失败（第 {} 次），丢弃直链重新解析",
-							YueMusic.MOD_NAME, track.title(), tries);
-					startCurrent();
-				} else {
-					YueMusic.LOGGER.warn("[{}] 《{}》连续 {} 次起播失败，跳过这首",
-							YueMusic.MOD_NAME, track.title(), tries);
-					startFailures.remove(key);
-					skipBroken(track);
-				}
+				handleStartFailure(track, key, player.error());
 			}
 			return;
 		}

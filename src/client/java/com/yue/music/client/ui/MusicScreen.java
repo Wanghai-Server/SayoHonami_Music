@@ -434,10 +434,18 @@ public class MusicScreen extends Screen {
 		addDrawableChild(toggleAudio);
 
 		loginMethodButton = ButtonWidget.builder(loginMethodText(), b -> {
-					// 在 QQ / 微信 之间切换登录方式
-					ScanLogin.Method next = MusicApi.activeLoginMethod() == ScanLogin.Method.QQ
-							? ScanLogin.Method.WECHAT : ScanLogin.Method.QQ;
-					MusicApi.setActiveLoginMethod(next);
+					// 在 QQ / 微信 / 网易云 之间循环切换登录方式
+					ScanLogin.Method[] all = {
+							ScanLogin.Method.QQ, ScanLogin.Method.WECHAT, ScanLogin.Method.NETEASE};
+					ScanLogin.Method cur = MusicApi.activeLoginMethod();
+					int i = 0;
+					for (int k = 0; k < all.length; k++) {
+						if (all[k] == cur) {
+							i = k;
+							break;
+						}
+					}
+					MusicApi.setActiveLoginMethod(all[(i + 1) % all.length]);
 					loginOpen = false;
 					loginState = "";
 					qrTextureId = null;
@@ -573,21 +581,35 @@ public class MusicScreen extends Screen {
 		cookieField = new TextFieldWidget(this.textRenderer, px + 8, row8,
 				pw - 16 - 88, btnH, Text.literal("Cookie"));
 		cookieField.setMaxLength(4096);
-		cookieField.setPlaceholder(Text.literal("扫码登不上？把浏览器里的 Cookie 粘到这里"));
+		cookieField.setPlaceholder(Text.literal("扫码登不上 / 网易云 → 把浏览器里的 Cookie 粘到这里"));
 		addDrawableChild(cookieField);
 
 		cookieButton = ButtonWidget.builder(Text.literal("导入"), b -> {
 					ScanLogin login = MusicApi.activeLogin();
-					String err = login == null ? "未初始化" : login.importCookies(cookieField.getText());
-					if (err == null) {
-						MusicApi.persistLogin(login);
-						loginState = "登录成功：" + login.method().label() + " · " + login.nickname();
-						b.setMessage(Text.literal("已导入 ✓"));
-						if (loginButton != null) loginButton.setMessage(loginButtonText());
-					} else {
-						loginState = "导入失败：" + err;
-						b.setMessage(Text.literal("导入失败"));
+					if (login == null) {
+						loginState = "未初始化";
+						return;
 					}
+					final String raw = cookieField.getText();
+					// ⚠ 导入要联网验证（QQ 取昵称 / 网易云查账号），必须在后台线程做，
+					// 否则会把渲染线程卡住最长十几秒（画面定格）。
+					loginState = "正在验证 Cookie…";
+					b.setMessage(Text.literal("验证中…"));
+					workers.submit(() -> {
+						String err = login.importCookies(raw);
+						net.minecraft.client.MinecraftClient.getInstance().execute(() -> {
+							if (err == null) {
+								MusicApi.persistLogin(login);
+								loginState = "登录成功：" + login.method().label()
+										+ (login.nickname().isBlank() ? "" : " · " + login.nickname());
+								b.setMessage(Text.literal("已导入 ✓"));
+								if (loginButton != null) loginButton.setMessage(loginButtonText());
+							} else {
+								loginState = "导入失败：" + err;
+								b.setMessage(Text.literal("导入失败"));
+							}
+						});
+					});
 				})
 				.dimensions(px + pw - 88, row8, 80, btnH).build();
 		addDrawableChild(cookieButton);
@@ -705,7 +727,7 @@ public class MusicScreen extends Screen {
 		return Text.literal("允许玩家点歌：" + (MusicConfig.get().allowPlayerRequest ? "开" : "关"));
 	}
 
-	/** 登录方式切换按钮：QQ音乐登录 / 微信登录。 */
+	/** 登录方式切换按钮：QQ音乐 / 微信 / 网易云。 */
 	private Text loginMethodText() {
 		return Text.literal("登录方式：" + MusicApi.activeLoginMethod().label());
 	}
@@ -716,7 +738,11 @@ public class MusicScreen extends Screen {
 		if (login != null && login.loggedIn()) {
 			String nick = login.nickname() == null || login.nickname().isBlank()
 					? login.method().label() : login.nickname();
-			return Text.literal("已登录（" + nick + "）· 点此重新扫码");
+			return Text.literal("已登录（" + nick + "）· 点此重新登录");
+		}
+		// 网易云没有二维码接口，按钮文案直说「用 Cookie」
+		if (MusicApi.activeLoginMethod() == ScanLogin.Method.NETEASE) {
+			return Text.literal("网易云：粘 Cookie 登录（点此看说明）");
 		}
 		return Text.literal(MusicApi.activeLoginMethod().buttonLabel() + "（扫码）");
 	}
@@ -795,6 +821,13 @@ public class MusicScreen extends Screen {
 		if (login == null) return;
 		if (login.loggedIn()) {
 			loginState = "已登录：" + login.method().label() + " · " + login.nickname();
+			return;
+		}
+		// 网易云没有二维码接口 → 直接引导到下面的 Cookie 输入框
+		if (MusicApi.activeLoginMethod() == ScanLogin.Method.NETEASE) {
+			loginOpen = false;
+			loginState = "网易云登录：把 MUSIC_U 粘到下面的输入框 → 点「导入」"
+					+ "（怎么拿：浏览器登录 music.163.com → F12 → Application → Cookies → MUSIC_U）";
 			return;
 		}
 		loginOpen = true;
@@ -1518,7 +1551,14 @@ public class MusicScreen extends Screen {
 			return true;
 		}
 		// 换页签：1~4
-		if (keyCode >= GLFW.GLFW_KEY_1 && keyCode <= GLFW.GLFW_KEY_4) {
+		//
+		// ⚠ 打字的时候**不能**抢数字键！
+		// 以前这里不看焦点，于是在搜索框里打「123」「2024」这类内容时，
+		// 数字键会先把页签切走（1=搜索 2=队列 3=播放 4=设置），
+		// 字根本没输进去 —— 表现就是「主键盘上方的数字键打不出来」。
+		// 输入框有焦点时，按键交给输入框自己处理。
+		if (!isTypingInTextField()
+				&& keyCode >= GLFW.GLFW_KEY_1 && keyCode <= GLFW.GLFW_KEY_4) {
 			int idx = keyCode - GLFW.GLFW_KEY_1;
 			if (idx < TABS.length) {
 				tab = idx;
@@ -1528,6 +1568,20 @@ public class MusicScreen extends Screen {
 			}
 		}
 		return super.keyPressed(input);
+	}
+
+	/**
+	 * 现在是不是正在某个输入框里打字？
+	 *
+	 * <p>用于让快捷键（1~4 切页签）在打字时<b>主动让位</b>，
+	 * 否则搜索框里永远打不出数字。
+	 */
+	private boolean isTypingInTextField() {
+		for (TextFieldWidget f : new TextFieldWidget[]{searchField, cookieField, importField}) {
+			if (f != null && f.isFocused()) return true;
+		}
+		// 兜底：任何获得焦点的输入框都算（以后加新输入框也不用手动登记）
+		return this.getFocused() instanceof TextFieldWidget;
 	}
 
 	@Override

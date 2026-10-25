@@ -2,6 +2,7 @@ package com.yue.music.server;
 
 import com.yue.music.YueMusic;
 import com.yue.music.api.MusicApi;
+import com.yue.music.api.ScanLogin;
 import com.yue.music.config.MusicConfig;
 import com.yue.music.model.MusicTrack;
 import com.yue.music.model.PlayUrl;
@@ -108,6 +109,11 @@ public final class ServerLogin {
 		}
 		if (parsed.isEmpty()) return "没解析出任何 Cookie";
 
+		// 先看是不是网易云的 MUSIC_U（两种平台的凭证完全不一样，不能混）
+		if (!parsed.containsKey("qm_keyst") && parsed.containsKey("MUSIC_U")) {
+			return loginWithNetease(raw, parsed);
+		}
+
 		String key = parsed.getOrDefault("qm_keyst", parsed.getOrDefault("qqmusic_key", ""));
 		if (key.isEmpty()) {
 			return "这串 Cookie 里没有 qm_keyst（登录凭证）。"
@@ -139,9 +145,46 @@ public final class ServerLogin {
 		MusicConfig cfg = MusicConfig.get();
 		cfg.qqCookies = new HashMap<>();
 		cfg.qqNickname = "";
+		cfg.neteaseCookies = new HashMap<>();
+		cfg.neteaseNickname = "";
 		cfg.save();
 		MusicApi.reloadLogin();
 		YueMusic.LOGGER.info("[{}] 服务端已退出登录", YueMusic.MOD_NAME);
+	}
+
+	/**
+	 * 用网易云的 {@code MUSIC_U} Cookie 登录。
+	 *
+	 * <p>和 QQ 那条路径分开：两家的凭证格式完全不同，
+	 * 校验方式也不一样（网易云查账号信息即可，不用去试解析歌曲）。
+	 *
+	 * @return 成功返回 null，失败返回中文原因
+	 */
+	private String loginWithNetease(String raw, Map<String, String> parsed) {
+		ScanLogin ne = MusicApi.neteaseLogin();
+		if (ne == null) return "网易云登录未初始化";
+
+		MusicConfig cfg = MusicConfig.get();
+		Map<String, String> backup = new HashMap<>(cfg.neteaseCookies == null ? Map.of() : cfg.neteaseCookies);
+
+		String err = ne.importCookies(raw);
+		if (err != null) {
+			// 失败 → 恢复原状，别留下坏凭证
+			ne.loadCookies(backup, cfg.neteaseNickname);
+			return err;
+		}
+
+		MusicApi.persistLogin(ne);
+		MusicApi.reloadLogin();
+
+		this.cookie = ne.cookieHeader();
+		this.nick = ne.nickname();
+		this.uin = parsed.getOrDefault("__uid", "netease");
+		this.loggedIn = true;
+		this.lastError = "";
+		YueMusic.LOGGER.info("[{}] 服务端已登录网易云 昵称={}",
+				YueMusic.MOD_NAME, nick.isEmpty() ? "(未知)" : nick);
+		return null;
 	}
 
 	/** 验证一组 Cookie 是否真能解析出播放地址（拿一首免费歌试探）。 */
