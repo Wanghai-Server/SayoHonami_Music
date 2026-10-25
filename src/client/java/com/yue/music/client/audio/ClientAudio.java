@@ -355,9 +355,23 @@ public final class ClientAudio {
 				// 这首歌之前起播失败过几次？（>0 说明上一根直链是坏的）
 				int failures = startFailures.getOrDefault(key, 0);
 				String url = urlCache.get(key);
-				if (url == null && failures == 0) {
-					// 优先用**服务端广播过来的直链**：那是服主账号解析的，
-					// 本机不需要登录就能直接下载（这才是「服务端登录」的意义）。
+				// ⚠ 本机如果登录了这个平台，就【不要】用服务端下发的直链。
+				//
+				// 服务端可能只登录了别的平台（日志实证：服务端登录了 QQ，
+				// 但队列里是网易云的歌）。这时服务端解析网易云只能拿到
+				// 「免登录外层地址」—— 对 VIP / 下架歌会返回 404 网页。
+				// 而玩家本机登录了网易云（有自己的会员），用本机账号解析
+				// 质量一定不比服务端差，甚至更好。
+				//
+				// 以前这里无条件信任服务端直链，导致「登录了网易云照样放不了」。
+				boolean useLocalAccount = MusicApi.loggedInFor(MusicSource.byId(track.source()));
+				if (url == null && failures == 0 && useLocalAccount) {
+					YueMusic.LOGGER.info("[{}] 本机已登录{}，忽略服务端直链，用本机账号解析《{}》",
+							YueMusic.MOD_NAME, MusicSource.byId(track.source()).displayName(), track.title());
+				}
+				if (url == null && failures == 0 && !useLocalAccount) {
+					// 本机没登录这个平台 → 用**服务端广播过来的直链**
+					//（那是服主账号解析的，本机不需要登录就能直接下载）。
 					//
 					// ⚠ 必须校验 key：pushedUrl 是全局字段，里面可能装着**上一首**的直链
 					//（服务端解析新歌要 1~3 秒，这期间广播里没有新直链）。
@@ -378,10 +392,22 @@ public final class ClientAudio {
 					}
 				}
 				if (url == null) {
-					// 失败过 → 说明原平台这根链已经放不了，直接去**另一个平台**找同名歌。
-					// 否则再解析一次原平台，只会拿到同一根坏链。
 					PlayUrl resolved;
-					if (failures > 0) {
+					if (failures > 0 && useLocalAccount) {
+						// 重试 + 本机登录了原平台 → 先用**本机账号**重解析一次。
+						//（可能是刚登录的，上一次用的还是服务端的坏链接）
+						YueMusic.LOGGER.info("[{}] 《{}》第 {} 次重试，先用本机{}账号重解析",
+								YueMusic.MOD_NAME, track.title(), failures + 1,
+								MusicSource.byId(track.source()).displayName());
+						resolved = MusicApi.resolve(track, true);
+						if (!resolved.ok()) {
+							YueMusic.LOGGER.info("[{}] 《{}》本机账号也拿不到地址，改从另一个平台找",
+									YueMusic.MOD_NAME, track.title());
+							resolved = MusicApi.resolveFromOther(track, true);
+						}
+					} else if (failures > 0) {
+						// 本机没登录这个平台 → 直接去**另一个平台**找同名歌，
+						// 否则再解析一次原平台只会拿到同一根坏链。
 						YueMusic.LOGGER.info("[{}] 《{}》第 {} 次重试，跳过原平台直链，改从另一个平台找",
 								YueMusic.MOD_NAME, track.title(), failures + 1);
 						resolved = MusicApi.resolveFromOther(track, true);
@@ -392,6 +418,17 @@ public final class ClientAudio {
 						lastError = resolved.error() == null ? "无法获取播放地址" : resolved.error();
 						YueMusic.LOGGER.warn("[{}] 本机解析失败（服务端也没给直链）：{} → {}",
 								YueMusic.MOD_NAME, track.display(), lastError);
+						// ⚠ 这里是【后台线程】，而此时可能早就切到下一首了。
+						// 如果不校验，旧歌的线程会继续按自己的结论发 NEXT / 改状态，
+						// 把刚起播的新歌打断 —— 日志实证：
+						//   14:45:57 起播《超能竞斗》→ 解码成功 → 已确认起播
+						//   14:45:57 【后台线程】起播失败《1》×2
+						//   14:45:57 收到状态 index=1 playing=false   ← 新歌被旧线程的 NEXT 打断
+						if (!isStillCurrent(key)) {
+							YueMusic.LOGGER.info("[{}] 《{}》的解析结果已过期（已切到别的歌），忽略",
+									YueMusic.MOD_NAME, track.title());
+							return;
+						}
 						// ⚠ 关键：如果服务端**登录过**，那它正在后台解析这首歌
 						// （歌单导入的歌 url 是空的，播到才解析，要 1~3 秒）。
 						// 这时候直接 skipBroken 会把整张歌单挨个跳过去 ——
@@ -467,6 +504,26 @@ public final class ClientAudio {
 	}
 
 	/**
+	 * 登录状态变了（刚登录 / 换账号 / 退出登录）→ 让新账号<b>立刻生效</b>。
+	 *
+	 * <p>为什么要主动清：直链缓存和失败计数都还是「登录前那个账号」留下的，
+	 * 不清的话会继续用旧直链（比如服务端下发的免登录地址），
+	 * 表现就是<b>「我明明登录了，怎么还是放不了」</b>。
+	 *
+	 * <p>如果当前正在放 / 正在加载的歌，就把它重新起播一次。
+	 */
+	public void onLoginChanged() {
+		urlCache.clear();
+		startFailures.clear();
+		if (!playingKey.isEmpty() || !loadingKey.isEmpty()) {
+			player.stop();
+			playingKey = "";
+			loadingKey = "";
+			startCurrent();
+		}
+	}
+
+	/**
 	 * 处理「这首起播失败」：清掉坏直链 → 重试（第二次起改走跨平台兜底）→ 连续 3 次仍失败就跳过。
 	 *
 	 * <p>失败可能来自两个地方：{@link AudioPlayer} 直接报错（state=ERROR），
@@ -477,6 +534,8 @@ public final class ClientAudio {
 	 * @param reason 失败原因（写进 lastError，界面上能看到）
 	 */
 	private void handleStartFailure(MusicTrack track, String key, String reason) {
+		// 旧歌的失败不要影响新歌（虽然这里多半在渲染线程，但多一道保险）
+		if (!isStillCurrent(key)) return;
 		// ⚠ 关键：必须把 urlCache 里这条直链清掉再重试。
 		// 否则会一直拿着同一根坏链（过期 vkey / CDN 抽风 / 歌已下架）
 		// 反复重试 —— 表现就是「插播了但一直不播放」，而且永远好不了。
@@ -502,9 +561,20 @@ public final class ClientAudio {
 		}
 	}
 
+	/**
+	 * 这个 key 现在还是「当前这首歌」吗？
+	 *
+	 * <p>后台线程跑完解析时要拿它校验一次 —— 因为解析期间玩家可能已经切歌 / 切房间，
+	 * 旧线程若还按自己的结论改状态、发 NEXT，就会把新歌打断。
+	 */
+	private boolean isStillCurrent(String key) {
+		MusicTrack cur = currentTrack();
+		if (cur == null) return false;
+		return key.equals(cur.source() + ":" + cur.id());
+	}
+
 	/** 这首歌所有平台都放不了，请求服务端切下一首。 */
-	private void skipBroken(MusicTrack track) {
-		if (lastNotice.isBlank()) {
+	private void skipBroken(MusicTrack track) {		if (lastNotice.isBlank()) {
 			lastNotice = "《" + track.title() + "》暂时放不了，已跳过";
 			noticeAt = System.currentTimeMillis();
 		}

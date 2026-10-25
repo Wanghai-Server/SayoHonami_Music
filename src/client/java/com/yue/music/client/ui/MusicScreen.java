@@ -600,6 +600,8 @@ public class MusicScreen extends Screen {
 						net.minecraft.client.MinecraftClient.getInstance().execute(() -> {
 							if (err == null) {
 								MusicApi.persistLogin(login);
+								// 让新账号立刻生效：清掉登录前缓存的直链，当前这首重起播
+								ClientAudio.get().onLoginChanged();
 								loginState = "登录成功：" + login.method().label()
 										+ (login.nickname().isBlank() ? "" : " · " + login.nickname());
 								b.setMessage(Text.literal("已导入 ✓"));

@@ -210,6 +210,25 @@ public final class MusicApi {
 		return LOGINS.get(ScanLogin.Method.NETEASE);
 	}
 
+	/**
+	 * 本机是否已登录某个平台。
+	 *
+	 * <p><b>为什么客户端需要它</b>：服务端会广播它解析好的直链，
+	 * 但服务端可能<b>没登录那个平台</b>（比如服主只登了 QQ）。
+	 * 这时服务端解析网易云的歌只能拿到「免登录外层地址」——
+	 * 那玩意对 VIP/下架歌会返回 404 网页。
+	 *
+	 * <p>而玩家本机如果登录了网易云（有自己的会员），
+	 * <b>用本机账号解析的质量一定不比服务端差</b>。
+	 * 所以客户端遇到「本机已登录该平台」时，应该忽略服务端直链、自己解析。
+	 */
+	public static boolean loggedInFor(MusicSource source) {
+		if (source == MusicSource.NETEASE) return neteaseLoggedIn();
+		// QQ音乐：QQ 或微信任何一种登录都算
+		ScanLogin.Method m = anyLoggedInMethod();
+		return m == ScanLogin.Method.QQ || m == ScanLogin.Method.WECHAT;
+	}
+
 	/** 生效的登录名（设置页显示用）。 */
 	public static String effectiveLoginLabel() {
 		ScanLogin a = activeLogin();
